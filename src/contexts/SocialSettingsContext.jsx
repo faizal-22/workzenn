@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { defaultSocialSettings } from "../lib/socialSettings.js";
+import { supabase } from "../lib/supabase.js";
 
 const SocialSettingsContext = createContext(null);
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim().replace(/\/+$/, "");
@@ -15,7 +16,7 @@ export function SocialSettingsProvider({ children }) {
 
     try {
       const response = await fetch(
-        `${supabaseUrl}/rest/v1/social_media_settings?select=instagram_username,instagram_url,whatsapp_number,business_email&id=eq.1`,
+        `${supabaseUrl}/rest/v1/social_media_settings?select=business_email&id=eq.1`,
         {
           headers: {
             apikey: supabaseAnonKey,
@@ -58,7 +59,6 @@ export function SocialSettingsProvider({ children }) {
       throw new Error("Supabase is not configured. Add the project URL and public anon key.");
     }
 
-    const { supabase } = await import("../lib/supabase.js");
     if (!supabase) {
       throw new Error("Supabase could not be initialized. Check the project URL and public anon key.");
     }
@@ -67,7 +67,7 @@ export function SocialSettingsProvider({ children }) {
       .from("social_media_settings")
       .update(nextSettings)
       .eq("id", 1)
-      .select("instagram_username, instagram_url, whatsapp_number, business_email")
+      .select("business_email")
       .single();
 
     if (error) throw error;

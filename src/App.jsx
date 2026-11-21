@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSocialSettings } from "./contexts/SocialSettingsContext.jsx";
+import { supabase } from "./lib/supabase.js";
 
 const services = [
   {
@@ -99,36 +100,15 @@ const packages = [
 ];
 
 const filters = ["All work", "Brand", "Web", "Growth"];
-
-function whatsappUrl(message, settings) {
-  const number = settings.whatsapp_number.replace(/\D/g, "");
-  const baseUrl = number ? `https://wa.me/${number}` : "https://wa.me/";
-  return `${baseUrl}?text=${encodeURIComponent(message)}`;
-}
-
-function instagramProfileUrl(settings) {
-  const configuredUrl = settings.instagram_url.trim();
-  if (configuredUrl) {
-    try {
-      const url = new URL(configuredUrl);
-      if (url.protocol === "https:" && ["instagram.com", "www.instagram.com"].includes(url.hostname.toLowerCase())) {
-        return url.toString();
-      }
-    } catch {
-      // Use the configured username or the Instagram homepage for invalid remote values.
-    }
-  }
-
-  const username = settings.instagram_username.trim().replace(/^@+/, "");
-  return username ? `https://www.instagram.com/${encodeURIComponent(username)}/` : "https://www.instagram.com/";
-}
-
-function instagramDmUrl(settings) {
-  const username = settings.instagram_username.trim().replace(/^@+/, "");
-  return username
-    ? `https://ig.me/m/${encodeURIComponent(username)}`
-    : instagramProfileUrl(settings);
-}
+const INSTAGRAM_PROFILE_URL = "https://www.instagram.com/_workzennn_/";
+const originalProjectStyles = {
+  "Forma Objects": "forma",
+  "Northline Studio": "northline",
+  "Goodside Coffee": "goodside",
+  "Fieldwork Goods": "fieldwork",
+  "Sunday Supply": "sunday",
+  "Relay Health": "relay",
+};
 
 function InstagramIcon() {
   return (
@@ -157,9 +137,17 @@ function ArrowIcon({ diagonal = false }) {
   );
 }
 
-function Logo() {
+function Logo({ official = false }) {
+  if (official) {
+    return (
+      <a aria-label="Home" className="brand-logo" href="/">
+        <img alt="WORKZENN Official Logo" src="/assets/workzenn-official-logo.jpeg" />
+      </a>
+    );
+  }
+
   return (
-    <a aria-label="WORKZENN home" className="brand-mark" href="#home">
+    <a aria-label="WORKZENN home" className="brand-mark" href="/">
       WORKZENN<span>.</span>
     </a>
   );
@@ -185,10 +173,18 @@ function ProjectCard({ project }) {
         className="project-art"
         role="img"
       >
-        <span className="project-art-mark">{project.mark}</span>
-        <span className="project-art-note">{project.note}</span>
-        <span aria-hidden="true" className="project-orbit" />
-        <span aria-hidden="true" className="project-shape" />
+        {project.asset_url ? (
+          project.asset_type === "video"
+            ? <video aria-label={`${project.name} project video`} controls muted playsInline src={project.asset_url} />
+            : <img alt={`${project.name} project`} src={project.asset_url} />
+        ) : (
+          <>
+            <span className="project-art-mark">{project.mark}</span>
+            <span className="project-art-note">{project.note}</span>
+            <span aria-hidden="true" className="project-orbit" />
+            <span aria-hidden="true" className="project-shape" />
+          </>
+        )}
       </div>
       <div className="project-meta">
         <div>
@@ -205,40 +201,120 @@ function ProjectCard({ project }) {
 
 function App() {
   const { settings } = useSocialSettings();
+  const [visibleServices, setVisibleServices] = useState(services);
+  const [visibleProjects, setVisibleProjects] = useState(projects);
+  const [visiblePackages, setVisiblePackages] = useState(packages);
   const [activeFilter, setActiveFilter] = useState("All work");
   const [menuOpen, setMenuOpen] = useState(false);
   const [formSubmitted, setFormSubmitted] = useState(false);
+  const [formSubmitting, setFormSubmitting] = useState(false);
+  const [formMessage, setFormMessage] = useState("");
 
-  const visibleProjects =
-    activeFilter === "All work"
-      ? projects
-      : projects.filter((project) => project.category === activeFilter);
+  useEffect(() => {
+    if (!supabase) return;
+    let active = true;
+    async function loadPublishedContent() {
+      const [portfolioResult, servicesResult, pricingResult] = await Promise.all([
+        supabase.from("portfolio_samples").select("id,name,type,category,description,asset_url,asset_type").eq("published", true).order("sort_order", { ascending: true }),
+        supabase.from("services").select("id,title,description,tags").eq("published", true).order("sort_order", { ascending: true }),
+        supabase.from("pricing_plans").select("id,name,detail,price,items,featured").eq("published", true).order("sort_order", { ascending: true }),
+      ]);
+      if (!active) return;
+      if (portfolioResult.error) console.error("Could not load published portfolio:", portfolioResult.error);
+      else {
+        setVisibleProjects(portfolioResult.data.map((project) => ({
+          ...project,
+          style: originalProjectStyles[project.name] || "managed",
+          mark: project.name.slice(0, 1),
+          note: project.description,
+        })));
+      }
+      if (servicesResult.error) console.error("Could not load published services:", servicesResult.error);
+      else if (servicesResult.data.length) setVisibleServices(servicesResult.data);
+      if (pricingResult.error) console.error("Could not load published pricing:", pricingResult.error);
+      else if (pricingResult.data.length) setVisiblePackages(pricingResult.data);
+    }
+    loadPublishedContent();
+    return () => { active = false; };
+  }, []);
 
   function closeMenu() {
     setMenuOpen(false);
   }
 
-  function handleTrialSubmit(event) {
+  async function handleTrialSubmit(event) {
     event.preventDefault();
-    const formData = new FormData(event.currentTarget);
-    const details = [
-      "Hi WORKZENN, I'd like to claim a free trial consultation.",
-      `Name: ${formData.get("name")}`,
-      `Email: ${formData.get("email")}`,
-      `Business: ${formData.get("business") || "Not provided"}`,
-      `I'm interested in: ${formData.get("service")}`,
-    ].join("\n");
+    const formElement = event.currentTarget;
+    const formData = new FormData(formElement);
+    const request = {
+      request_type: "trial",
+      name: String(formData.get("name")).trim(),
+      email: String(formData.get("email")).trim(),
+      business: String(formData.get("business") || "").trim(),
+      service: String(formData.get("service")),
+      budget: String(formData.get("budget")),
+      description: String(formData.get("description")).trim(),
+    };
 
-    window.open(whatsappUrl(details, settings), "_blank", "noopener,noreferrer");
+    window.open(INSTAGRAM_PROFILE_URL, "_blank", "noopener,noreferrer");
+    setFormSubmitted(false);
+    setFormSubmitting(true);
+    setFormMessage("");
+
+    if (!supabase) {
+      setFormSubmitted(true);
+      setFormMessage("We opened Instagram, but this enquiry could not be saved because the form service is unavailable. Please try again later.");
+      setFormSubmitting(false);
+      return;
+    }
+
+    let enquiryId;
+    try {
+      const { data, error: saveError } = await supabase.rpc("submit_customer_enquiry", {
+        p_request_type: request.request_type,
+        p_name: request.name,
+        p_email: request.email,
+        p_business: request.business,
+        p_service: request.service,
+        p_budget: request.budget,
+        p_description: request.description,
+      });
+      if (saveError) throw saveError;
+      enquiryId = data;
+    } catch (error) {
+      console.error("Could not save customer enquiry:", error);
+      setFormSubmitted(true);
+      setFormMessage("We opened Instagram, but your enquiry could not be saved. Please try again or message us on Instagram.");
+      setFormSubmitting(false);
+      return;
+    }
+
+    formElement.reset();
     setFormSubmitted(true);
-    event.currentTarget.reset();
+    try {
+      const { data: notification, error: notificationError } = await supabase.functions.invoke(
+        "send-enquiry-notification",
+        { body: { enquiryId } },
+      );
+      if (notificationError || notification?.status !== "sent") {
+        console.error("Enquiry saved, but email notification was not delivered:", notificationError || notification);
+        setFormMessage("Your enquiry was saved and WORKZENN will follow up. Email notification is pending; you can also message us on Instagram.");
+      } else {
+        setFormMessage("Your enquiry was saved and sent to WORKZENN. Instagram opened in a new tab if you'd also like to say hello.");
+      }
+    } catch (error) {
+      console.error("Enquiry saved, but email notification request failed:", error);
+      setFormMessage("Your enquiry was saved and WORKZENN will follow up. Email notification is pending; you can also message us on Instagram.");
+    } finally {
+      setFormSubmitting(false);
+    }
   }
 
   return (
     <>
       <header className="site-header">
         <nav aria-label="Main navigation" className="nav-shell">
-          <Logo />
+          <Logo official />
           <button
             aria-controls="primary-navigation"
             aria-expanded={menuOpen}
@@ -263,14 +339,14 @@ function App() {
             <a
               aria-label="Visit WORKZENN on Instagram"
               className="instagram-icon-button"
-              href={instagramProfileUrl(settings)}
+              href={INSTAGRAM_PROFILE_URL}
               onClick={closeMenu}
               rel="noreferrer"
               target="_blank"
             >
               <InstagramIcon />
             </a>
-            <a className="button button-small button-red nav-cta" href="#contact" onClick={closeMenu}>
+            <a className="button button-small button-red nav-cta" href={INSTAGRAM_PROFILE_URL} onClick={closeMenu} rel="noreferrer" target="_blank">
               Let&apos;s talk <ArrowIcon diagonal />
             </a>
           </div>
@@ -291,13 +367,13 @@ function App() {
               built to move your business forward.
             </p>
             <div className="hero-actions">
-              <a className="button button-red" href="#contact">
+              <a className="button button-red" href={INSTAGRAM_PROFILE_URL} rel="noreferrer" target="_blank">
                 Start a project <ArrowIcon diagonal />
               </a>
               <a className="text-link" href="#work">
                 See our work <ArrowIcon />
               </a>
-              <a className="text-link instagram-follow" href={instagramProfileUrl(settings)} rel="noreferrer" target="_blank">
+              <a className="text-link instagram-follow" href={INSTAGRAM_PROFILE_URL} rel="noreferrer" target="_blank">
                 Follow us <InstagramIcon />
               </a>
             </div>
@@ -330,11 +406,11 @@ function App() {
             copy="One thoughtful team, from the first big question to the final details."
           />
           <div className="service-grid">
-            {services.map((service) => (
+            {visibleServices.map((service) => (
               <a
                 className="service-card"
-                href={whatsappUrl(`Hi WORKZENN, I'd like to talk about ${service.title.toLowerCase()}.`, settings)}
-                key={service.number}
+                href={INSTAGRAM_PROFILE_URL}
+                key={service.id || service.number}
                 rel="noreferrer"
                 target="_blank"
               >
@@ -370,7 +446,10 @@ function App() {
               ))}
             </div>
             <div aria-live="polite" className="project-grid">
-              {visibleProjects.map((project) => <ProjectCard key={project.name} project={project} />)}
+              {(activeFilter === "All work"
+                ? visibleProjects
+                : visibleProjects.filter((project) => project.category === activeFilter)
+              ).map((project) => <ProjectCard key={project.id || project.name} project={project} />)}
             </div>
           </div>
         </section>
@@ -388,7 +467,7 @@ function App() {
                 We keep teams small, conversations honest, and the work focused
                 on what actually makes a difference.
               </p>
-              <a className="text-link" href="#contact">Get to know us <ArrowIcon /></a>
+              <a className="text-link" href={INSTAGRAM_PROFILE_URL} rel="noreferrer" target="_blank">Get to know us <ArrowIcon diagonal /></a>
             </div>
           </div>
         </section>
@@ -400,7 +479,7 @@ function App() {
             copy="Every project is different. These starting points give us a good place to begin."
           />
           <div className="pricing-grid">
-            {packages.map((plan) => (
+            {visiblePackages.map((plan) => (
               <article className={`price-card${plan.featured ? " price-featured" : ""}`} key={plan.name}>
                 {plan.featured && <span className="popular-label">A good place to start</span>}
                 <p className="eyebrow">{plan.detail}</p>
@@ -411,7 +490,7 @@ function App() {
                 </ul>
                 <a
                   className={`button${plan.featured ? " button-red" : " button-outline"}`}
-                  href={whatsappUrl(`Hi WORKZENN, I'm interested in the "${plan.name}" package. Can we talk?`, settings)}
+                  href={INSTAGRAM_PROFILE_URL}
                   rel="noreferrer"
                   target="_blank"
                 >
@@ -433,7 +512,7 @@ function App() {
               </p>
               <div className="contact-note"><span>↗</span><span>Usually reply within one business day.</span></div>
               <div className="contact-social-links">
-                <a className="button button-outline" href={instagramDmUrl(settings)} rel="noreferrer" target="_blank">
+                <a className="button button-outline" href={INSTAGRAM_PROFILE_URL} rel="noreferrer" target="_blank">
                   Message us on Instagram <InstagramIcon />
                 </a>
                 {settings.business_email && (
@@ -470,13 +549,28 @@ function App() {
                   <option>Not sure yet</option>
                 </select>
               </label>
-              <button className="button button-red form-submit" type="submit">
-                Send your enquiry <ArrowIcon diagonal />
+              <label>
+                Project budget <span>*</span>
+                <select defaultValue="" name="budget" required>
+                  <option disabled value="">Choose a budget range</option>
+                  <option>Under $1,200</option>
+                  <option>$1,200–$3,500</option>
+                  <option>$3,500–$7,500</option>
+                  <option>$7,500+</option>
+                  <option>Not sure yet</option>
+                </select>
+              </label>
+              <label>
+                Project description <span>*</span>
+                <textarea autoComplete="off" maxLength={5000} minLength={10} name="description" placeholder="Tell us what you are looking to create or improve..." required rows="4" />
+              </label>
+              <button className="button button-red form-submit" disabled={formSubmitting} type="submit">
+                {formSubmitting ? "Saving enquiry..." : "Send enquiry & open Instagram"} <ArrowIcon diagonal />
               </button>
-              <p aria-live="polite" className="form-feedback">
+              <p aria-live="polite" className={`form-feedback${formSubmitted && formMessage.includes("could not") ? " form-feedback-error" : ""}`}>
                 {formSubmitted
-                  ? "Your message is ready in WhatsApp. Send it there and we'll be in touch."
-                  : "No spam, no hard sell. Just a human conversation."}
+                  ? formMessage
+                  : "Your enquiry is saved securely. Instagram opens in a new tab when you submit."}
               </p>
             </form>
           </div>
@@ -491,10 +585,10 @@ function App() {
             <a href="#work">Work</a>
             <a href="#about">About</a>
             <a href="#pricing">Pricing</a>
-            <a href="#contact">Contact</a>
-            <a href={instagramProfileUrl(settings)} rel="noreferrer" target="_blank">Instagram</a>
+            <a href={INSTAGRAM_PROFILE_URL} rel="noreferrer" target="_blank">Contact</a>
+            <a href={INSTAGRAM_PROFILE_URL} rel="noreferrer" target="_blank">Instagram</a>
           </div>
-          <a className="footer-contact" href={whatsappUrl("Hi WORKZENN, I'd like to start a conversation.", settings)} rel="noreferrer" target="_blank">
+          <a className="footer-contact" href={INSTAGRAM_PROFILE_URL} rel="noreferrer" target="_blank">
             Have a good one in mind? <span>Let&apos;s talk <ArrowIcon diagonal /></span>
           </a>
         </div>

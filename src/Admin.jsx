@@ -1,7 +1,22 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { supabase, supabaseConfigured } from "./lib/supabase.js";
 import { defaultSocialSettings } from "./lib/socialSettings.js";
 import { useSocialSettings } from "./contexts/SocialSettingsContext.jsx";
+
+const ADMIN_EMAIL = "workzenn7@gmail.com";
+const STORAGE_BUCKET = "workzenn-portfolio";
+const sections = [
+  ["overview", "Dashboard Overview"],
+  ["portfolio", "Portfolio Management"],
+  ["videos", "Upload Videos"],
+  ["logos", "Upload Logos"],
+  ["posters", "Upload Posters"],
+  ["services", "Manage Services"],
+  ["pricing", "Manage Pricing"],
+  ["enquiries", "Customer Enquiries"],
+  ["trials", "Free Trial Requests"],
+  ["social", "Social Media Settings"],
+];
 
 function isRecoveryFlow() {
   const hash = new URLSearchParams(window.location.hash.slice(1));
@@ -40,32 +55,38 @@ function AdminLogin() {
     }
 
     const formData = new FormData(event.currentTarget);
-    setBusy(true);
+    const email = String(formData.get("email")).trim();
+    if (email.toLowerCase() !== ADMIN_EMAIL) {
+      setErrorMessage("This account is not authorized to access the admin dashboard.");
+      return;
+    }
 
+    setBusy(true);
+    let authenticated = false;
     try {
       const { data, error } = await supabase.auth.signInWithPassword({
-        email: String(formData.get("email")).trim(),
+        email,
         password: String(formData.get("password")),
       });
-
       if (error) throw error;
+      authenticated = true;
 
-      const { data: admin, error: authorizationError } = await supabase
-        .from("admin_users")
-        .select("user_id")
-        .eq("user_id", data.user.id)
-        .maybeSingle();
-
+      const { data: authorized, error: authorizationError } = await supabase.rpc("is_workzenn_admin");
       if (authorizationError) throw authorizationError;
 
-      if (!admin) {
+      if (!data.user.email_confirmed_at) {
+        await supabase.auth.signOut();
+        setErrorMessage("Verify the admin email address before signing in.");
+        return;
+      }
+      if (!authorized) {
         await supabase.auth.signOut();
         setErrorMessage("This account is not authorized to access the admin dashboard.");
         return;
       }
-
       window.location.assign("/admin");
     } catch (error) {
+      if (authenticated) await supabase.auth.signOut();
       setErrorMessage(error.message || "Sign-in failed. Please try again.");
     } finally {
       setBusy(false);
@@ -82,15 +103,19 @@ function AdminLogin() {
       return;
     }
 
-    const email = new FormData(event.currentTarget).get("email");
-    setBusy(true);
+    const email = String(new FormData(event.currentTarget).get("email")).trim();
+    if (email.toLowerCase() !== ADMIN_EMAIL) {
+      setErrorMessage("Password reset is available only for the authorized admin email.");
+      return;
+    }
 
+    setBusy(true);
     try {
-      const { error } = await supabase.auth.resetPasswordForEmail(String(email).trim(), {
+      const { error } = await supabase.auth.resetPasswordForEmail(ADMIN_EMAIL, {
         redirectTo: `${window.location.origin}/admin/login?mode=reset`,
       });
       if (error) throw error;
-      setMessage("If an account exists for that email, a password reset link is on its way.");
+      setMessage("If an account exists for the admin email, a password reset link is on its way.");
     } catch (error) {
       setErrorMessage(error.message || "Could not request a reset link. Please try again.");
     } finally {
@@ -110,7 +135,6 @@ function AdminLogin() {
 
     const password = new FormData(event.currentTarget).get("password");
     setBusy(true);
-
     try {
       const { error } = await supabase.auth.updateUser({ password: String(password) });
       if (error) throw error;
@@ -135,10 +159,10 @@ function AdminLogin() {
           </h1>
           <p>
             {mode === "forgot"
-              ? "Enter the email address linked to your admin account."
+              ? "Request a secure reset link for the authorized admin email."
               : mode === "update"
                 ? "Choose a strong password for your admin account."
-                : "Sign in with an authorized WORKZENN admin account."}
+                : "Sign in with the authorized WORKZENN admin account."}
           </p>
         </div>
         {!supabaseConfigured && (
@@ -149,7 +173,7 @@ function AdminLogin() {
 
         {mode === "login" && (
           <form className="admin-form" onSubmit={handleLogin}>
-            <label>Email address<input autoComplete="email" name="email" required type="email" /></label>
+            <label>Email address<input autoComplete="email" defaultValue={ADMIN_EMAIL} name="email" required type="email" /></label>
             <label>Password<input autoComplete="current-password" name="password" required type="password" /></label>
             <button className="button button-red" disabled={busy || !supabaseConfigured} type="submit">
               {busy ? "Signing in..." : "Sign in"}
@@ -162,7 +186,7 @@ function AdminLogin() {
 
         {mode === "forgot" && (
           <form className="admin-form" onSubmit={handleForgotPassword}>
-            <label>Email address<input autoComplete="email" name="email" required type="email" /></label>
+            <label>Email address<input autoComplete="email" defaultValue={ADMIN_EMAIL} name="email" required type="email" /></label>
             <button className="button button-red" disabled={busy || !supabaseConfigured} type="submit">
               {busy ? "Sending..." : "Send reset link"}
             </button>
@@ -192,16 +216,391 @@ function AdminLogin() {
   );
 }
 
-function AdminDashboard() {
+const managerConfig = {
+  portfolio: {
+    table: "portfolio_samples",
+    title: "Portfolio samples",
+    description: "Add, edit, publish, and remove portfolio work shown on the public website.",
+    fields: ["name", "category", "type", "description", "asset_type", "asset_url", "published"],
+  },
+  videos: {
+    table: "portfolio_samples",
+    title: "Upload videos",
+    description: "Upload a video and attach it to a portfolio sample.",
+    fields: ["name", "category", "type", "description", "asset_type", "asset_url", "published"],
+    assetType: "video",
+  },
+  logos: {
+    table: "portfolio_samples",
+    title: "Upload logos",
+    description: "Upload a logo and attach it to a portfolio sample.",
+    fields: ["name", "category", "type", "description", "asset_type", "asset_url", "published"],
+    assetType: "logo",
+  },
+  posters: {
+    table: "portfolio_samples",
+    title: "Upload posters",
+    description: "Upload a poster and attach it to a portfolio sample.",
+    fields: ["name", "category", "type", "description", "asset_type", "asset_url", "published"],
+    assetType: "poster",
+  },
+  services: {
+    table: "services",
+    title: "Services",
+    description: "Manage the services displayed on the public website.",
+    fields: ["title", "description", "tags", "published"],
+  },
+  pricing: {
+    table: "pricing_plans",
+    title: "Pricing plans",
+    description: "Manage the pricing packages displayed on the public website.",
+    fields: ["name", "detail", "price", "items", "featured", "published"],
+  },
+  enquiries: {
+    table: "customer_enquiries",
+    title: "Customer enquiries",
+    description: "Review messages submitted through the public website.",
+    requestType: "enquiry",
+    readOnly: true,
+  },
+  trials: {
+    table: "customer_enquiries",
+    title: "Free trial requests",
+    description: "Review requests for a complimentary consultation.",
+    requestType: "trial",
+    readOnly: true,
+  },
+};
+
+function initialValues(section) {
+  const defaults = {
+    name: "",
+    title: "",
+    category: "Brand",
+    type: "",
+    description: "",
+    asset_type: managerConfig[section].assetType || "poster",
+    asset_url: "",
+    storage_path: "",
+    published: false,
+    tags: "",
+    detail: "",
+    price: "",
+    items: "",
+    featured: false,
+  };
+  return defaults;
+}
+
+function AdminManager({ section }) {
+  const config = managerConfig[section];
+  const [rows, setRows] = useState([]);
+  const [values, setValues] = useState(() => initialValues(section));
+  const [editingId, setEditingId] = useState("");
+  const [file, setFile] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+  const [status, setStatus] = useState("");
+
+  const loadRows = useCallback(async () => {
+    setLoading(true);
+    setErrorMessage("");
+    let query = supabase.from(config.table).select("*");
+    if (config.requestType) query = query.eq("request_type", config.requestType);
+    if (config.assetType) query = query.eq("asset_type", config.assetType);
+    if (config.table === "customer_enquiries") query = query.order("created_at", { ascending: false });
+    else query = query.order("sort_order", { ascending: true }).order("created_at", { ascending: false });
+
+    const { data, error } = await query;
+    if (error) setErrorMessage(error.message || "Could not load this section.");
+    else setRows(data || []);
+    setLoading(false);
+  }, [config]);
+
+  useEffect(() => {
+    loadRows();
+  }, [loadRows]);
+
+  function startEdit(row) {
+    setEditingId(row.id);
+    setValues({
+      ...initialValues(section),
+      ...row,
+      tags: Array.isArray(row.tags) ? row.tags.join(", ") : "",
+      items: Array.isArray(row.items) ? row.items.join("\n") : "",
+    });
+    setFile(null);
+    setStatus("");
+    setErrorMessage("");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function resetForm() {
+    setEditingId("");
+    setValues(initialValues(section));
+    setFile(null);
+  }
+
+  async function handleSave(event) {
+    event.preventDefault();
+    setBusy(true);
+    setErrorMessage("");
+    setStatus("");
+    let nextValues = { ...values };
+    let uploadedPath = "";
+    let cleanupWarning = "";
+
+    try {
+      if (file) {
+        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "-");
+        const path = `${crypto.randomUUID()}-${safeName}`;
+        const { error: uploadError } = await supabase.storage
+          .from(STORAGE_BUCKET)
+          .upload(path, file, { upsert: false, contentType: file.type });
+        if (uploadError) throw uploadError;
+        uploadedPath = path;
+        const { data: publicUrl } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path);
+        nextValues.asset_url = publicUrl.publicUrl;
+        nextValues.storage_path = path;
+      }
+
+      if (config.table === "services") {
+        nextValues.tags = String(values.tags).split(",").map((tag) => tag.trim()).filter(Boolean);
+      }
+      if (config.table === "pricing_plans") {
+        nextValues.items = String(values.items).split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+      }
+
+      const editable = config.fields.concat("sort_order").reduce((result, field) => {
+        if (field in nextValues) result[field] = nextValues[field];
+        return result;
+      }, {});
+      if (config.table === "portfolio_samples") {
+        editable.asset_url = nextValues.asset_url || "";
+        editable.storage_path = nextValues.storage_path || "";
+      }
+      if (config.table === "services") editable.tags = nextValues.tags;
+      if (config.table === "pricing_plans") editable.items = nextValues.items;
+
+      const request = editingId
+        ? supabase.from(config.table).update(editable).eq("id", editingId)
+        : supabase.from(config.table).insert(editable);
+      const { error } = await request;
+      if (error) throw error;
+
+      if (uploadedPath && editingId && values.storage_path && values.storage_path !== uploadedPath) {
+        const { error: cleanupError } = await supabase.storage.from(STORAGE_BUCKET).remove([values.storage_path]);
+        if (cleanupError) cleanupWarning = `Saved successfully, but the replaced upload could not be removed: ${cleanupError.message}`;
+      }
+      setStatus(editingId ? "Changes saved." : "Item created.");
+      resetForm();
+      await loadRows();
+      if (cleanupWarning) setErrorMessage(cleanupWarning);
+    } catch (error) {
+      let cleanupMessage = "";
+      if (uploadedPath) {
+        const { error: cleanupError } = await supabase.storage.from(STORAGE_BUCKET).remove([uploadedPath]);
+        if (cleanupError) cleanupMessage = ` The uploaded file could not be cleaned up: ${cleanupError.message}`;
+      }
+      setErrorMessage(`${error.message || "Could not save this item."}${cleanupMessage}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete(row) {
+    if (!window.confirm(`Delete "${row.name || row.title || row.email}"?`)) return;
+    setErrorMessage("");
+    setStatus("");
+    const { error } = await supabase.from(config.table).delete().eq("id", row.id);
+    if (error) {
+      setErrorMessage(error.message || "Could not delete this item.");
+      return;
+    }
+    if (row.storage_path) {
+      const { error: storageError } = await supabase.storage.from(STORAGE_BUCKET).remove([row.storage_path]);
+      if (storageError) setErrorMessage(`Item deleted, but its uploaded file could not be removed: ${storageError.message}`);
+    }
+    setStatus("Item deleted.");
+    await loadRows();
+  }
+
+  async function handleToggle(row) {
+    const { error } = await supabase.from(config.table).update({ published: !row.published }).eq("id", row.id);
+    if (error) setErrorMessage(error.message || "Could not change the publish status.");
+    else await loadRows();
+  }
+
+  async function handleStatusChange(row, statusValue) {
+    setErrorMessage("");
+    const { error } = await supabase.from("customer_enquiries").update({ status: statusValue }).eq("id", row.id);
+    if (error) setErrorMessage(error.message || "Could not update the enquiry status.");
+    else await loadRows();
+  }
+
+  async function handleNotificationRetry(row) {
+    setErrorMessage("");
+    const { data, error } = await supabase.functions.invoke("send-enquiry-notification", {
+      body: { enquiryId: row.id },
+    });
+    if (error) {
+      setErrorMessage(`Enquiry is still saved, but email retry failed: ${error.message}`);
+      return;
+    }
+    if (data?.status !== "sent" && data?.status !== "already_sent") {
+      setErrorMessage(`Enquiry is still saved, but email notification was not delivered: ${data?.message || "Unknown error."}`);
+      return;
+    }
+    setStatus("Email notification delivered.");
+    await loadRows();
+  }
+
+  function updateField(event) {
+    const { name, value, type, checked, files } = event.target;
+    if (type === "file") {
+      const selectedFile = files && files[0];
+      setFile(selectedFile || null);
+      if (selectedFile && config.assetType) {
+        setValues((current) => ({ ...current, asset_type: config.assetType }));
+      }
+      return;
+    }
+    setValues((current) => ({ ...current, [name]: type === "checkbox" ? checked : value }));
+  }
+
+  return (
+    <>
+      <div className="admin-dashboard-heading">
+        <p className="eyebrow"><span className="status-dot" /> Admin workspace</p>
+        <h1>{config.title}</h1>
+        <p>{config.description}</p>
+      </div>
+      {!config.readOnly && (
+        <form className="admin-settings-card admin-manager-form" onSubmit={handleSave}>
+          <div className="admin-settings-title">
+            <span className="admin-settings-icon">{config.table === "portfolio_samples" ? "↥" : "+"}</span>
+            <div><h2>{editingId ? "Edit item" : "Add an item"}</h2><p>Changes are protected by database authorization policies.</p></div>
+          </div>
+
+          {(config.table === "portfolio_samples" || config.table === "pricing_plans") && (
+            <label>
+              {config.table === "pricing_plans" ? "Plan name" : "Project name"}
+              <input name="name" onChange={updateField} required value={values.name} />
+            </label>
+          )}
+          {config.table === "services" && (
+            <label>Service name<input name="title" onChange={updateField} required value={values.title} /></label>
+          )}
+          {config.table === "portfolio_samples" && (
+            <>
+              <label>Category<input name="category" onChange={updateField} required value={values.category} /></label>
+              <label>Project type<input name="type" onChange={updateField} value={values.type} /></label>
+              <label>Description<textarea name="description" onChange={updateField} rows="3" value={values.description} /></label>
+              <label>Media type
+                <select name="asset_type" onChange={updateField} value={values.asset_type}>
+                  <option value="video">Video</option><option value="logo">Logo</option><option value="poster">Poster</option>
+                </select>
+              </label>
+              <label>Upload media
+                <input accept={values.asset_type === "video" ? "video/mp4,video/webm,video/quicktime" : "image/jpeg,image/png,image/webp,image/gif"} name="file" onChange={updateField} type="file" />
+                <span className="admin-field-hint">Up to 100 MB. Uploading a file replaces this sample&apos;s current media.</span>
+              </label>
+              <label>Media URL<input name="asset_url" onChange={updateField} type="url" value={values.asset_url} /></label>
+            </>
+          )}
+          {config.table === "services" && (
+            <>
+              <label>Description<textarea name="description" onChange={updateField} rows="3" value={values.description} /></label>
+              <label>Tags, separated by commas<input name="tags" onChange={updateField} value={values.tags} /></label>
+            </>
+          )}
+          {config.table === "pricing_plans" && (
+            <>
+              <label>Plan detail<input name="detail" onChange={updateField} value={values.detail} /></label>
+              <label>Price<input name="price" onChange={updateField} value={values.price} /></label>
+              <label>What's included (one per line)<textarea name="items" onChange={updateField} rows="4" value={values.items} /></label>
+              <label className="admin-checkbox-label"><input checked={values.featured} name="featured" onChange={updateField} type="checkbox" /> Highlight as featured</label>
+            </>
+          )}
+          <label className="admin-checkbox-label">
+            <input checked={values.published} name="published" onChange={updateField} type="checkbox" /> Published on the website
+          </label>
+          {errorMessage && <p aria-live="polite" className="admin-alert admin-alert-error" role="alert">{errorMessage}</p>}
+          {status && <p aria-live="polite" className="admin-alert admin-alert-success" role="status">{status}</p>}
+          <div className="admin-manager-actions">
+            <button className="button button-red admin-save-button" disabled={busy} type="submit">{busy ? "Saving..." : editingId ? "Save changes" : "Create item"}</button>
+            {editingId && <button className="admin-text-button" onClick={resetForm} type="button">Cancel edit</button>}
+          </div>
+        </form>
+      )}
+      {config.readOnly && errorMessage && <p aria-live="polite" className="admin-alert admin-alert-error" role="alert">{errorMessage}</p>}
+      {status && config.readOnly && <p className="admin-alert admin-alert-success" role="status">{status}</p>}
+      <section aria-label={config.title} className="admin-record-list">
+        {loading ? <p className="admin-muted">Loading...</p> : rows.length === 0 ? <p className="admin-muted">No items yet.</p> : rows.map((row) => (
+          <article className="admin-record" key={row.id}>
+            <div>
+              <h2>{row.name || row.title || row.email}</h2>
+              <p>{row.description || row.service || row.detail || row.email || row.request_type}</p>
+              {row.created_at && <time dateTime={row.created_at}>{new Date(row.created_at).toLocaleString()}</time>}
+              {row.request_type && <p>Request type: {row.request_type === "trial" ? "Free trial" : "Enquiry"}</p>}
+              {row.email && <a className="admin-record-link" href={`mailto:${row.email}`}>{row.email}</a>}
+              {row.service && <p>Selected service: {row.service}</p>}
+              {row.budget && <p>Budget: {row.budget}</p>}
+              {row.business && <p>Business: {row.business}</p>}
+              {row.request_type && row.description && <p>Project description: {row.description}</p>}
+              {row.notification_status && <p>Email notification: {row.notification_status}</p>}
+              {row.notification_error && <p className="admin-notification-error">Notification error: {row.notification_error}</p>}
+              {"published" in row && <span className={`admin-record-status${row.published ? " is-published" : ""}`}>{row.published ? "Published" : "Draft"}</span>}
+              {row.asset_url && <a className="admin-record-link" href={row.asset_url} rel="noreferrer" target="_blank">View media</a>}
+              {row.status && <label className="admin-record-status-control">Status
+                <select onChange={(event) => handleStatusChange(row, event.target.value)} value={row.status}>
+                  <option value="new">New</option>
+                  <option value="in_progress">In progress</option>
+                  <option value="completed">Completed</option>
+                </select>
+              </label>}
+            </div>
+            <div className="admin-record-actions">
+              {config.table === "portfolio_samples" && <button className="admin-text-button" onClick={() => handleToggle(row)} type="button">{row.published ? "Unpublish" : "Publish"}</button>}
+              {row.request_type && ["pending", "failed"].includes(row.notification_status) && <button className="admin-text-button" onClick={() => handleNotificationRetry(row)} type="button">Retry email</button>}
+              {!config.readOnly && <button className="admin-text-button" onClick={() => startEdit(row)} type="button">Edit</button>}
+              <button className="admin-text-button" onClick={() => handleDelete(row)} type="button">Delete</button>
+            </div>
+          </article>
+        ))}
+      </section>
+    </>
+  );
+}
+
+function DashboardOverview({ onNavigate }) {
+  return (
+    <>
+      <div className="admin-dashboard-heading">
+        <p className="eyebrow"><span className="status-dot" /> Private workspace</p>
+        <h1>Dashboard overview</h1>
+        <p>Manage your portfolio, website content, enquiries, and social links.</p>
+      </div>
+      <div className="admin-overview-grid">
+        {sections.slice(1).map(([id, title]) => (
+          <button className="admin-overview-card" key={id} onClick={() => onNavigate(id)} type="button">
+            <span>{title}</span><span aria-hidden="true">↗</span>
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function SocialSettingsManager() {
   const { settings, loadError, loadSettings, saveSettings } = useSocialSettings();
   const [form, setForm] = useState(defaultSocialSettings);
   const [status, setStatus] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    setForm(settings);
-  }, [settings]);
+  useEffect(() => setForm(settings), [settings]);
 
   function updateField(event) {
     setForm((current) => ({ ...current, [event.target.name]: event.target.value }));
@@ -212,44 +611,11 @@ function AdminDashboard() {
     setErrorMessage("");
     setStatus("");
 
-    const username = form.instagram_username.trim().replace(/^@+/, "");
-    const instagramUrl = form.instagram_url.trim();
-    let normalizedUrl = instagramUrl;
-
-    if (instagramUrl) {
-      try {
-        const parsedUrl = new URL(instagramUrl);
-        if (
-          parsedUrl.protocol !== "https:" ||
-          !["instagram.com", "www.instagram.com"].includes(parsedUrl.hostname.toLowerCase())
-        ) {
-          throw new Error("Use a secure Instagram profile URL, such as https://www.instagram.com/yourname/.");
-        }
-        normalizedUrl = parsedUrl.toString();
-      } catch (error) {
-        setErrorMessage((error.message || "").startsWith("Use a secure")
-          ? error.message
-          : "Enter a valid HTTPS Instagram profile URL.");
-        return;
-      }
-    }
-
-    const whatsappNumber = form.whatsapp_number.replace(/\D/g, "");
-    if (whatsappNumber && (whatsappNumber.length < 8 || whatsappNumber.length > 15)) {
-      setErrorMessage("Enter a WhatsApp number with country code (8–15 digits).");
-      return;
-    }
-
-    const nextSettings = {
-      instagram_username: username,
-      instagram_url: normalizedUrl,
-      whatsapp_number: whatsappNumber,
-      business_email: form.business_email.trim(),
-    };
-
     setSaving(true);
     try {
-      await saveSettings(nextSettings);
+      await saveSettings({
+        business_email: form.business_email.trim(),
+      });
       setStatus("Social media settings saved.");
     } catch (error) {
       setErrorMessage(error.message || "Could not save settings. Please try again.");
@@ -258,18 +624,42 @@ function AdminDashboard() {
     }
   }
 
-  async function handleLogout() {
-    if (!supabase) {
-      window.location.replace("/admin/login");
-      return;
-    }
+  return (
+    <>
+      <div className="admin-dashboard-heading">
+        <p className="eyebrow"><span className="status-dot" /> Site configuration</p>
+        <h1>Social media settings</h1>
+        <p>Update your public contact and social links. Changes are used throughout the website.</p>
+      </div>
+      <form className="admin-settings-card" onSubmit={handleSave}>
+        <div className="admin-settings-title">
+          <span className="admin-settings-icon"><InstagramIcon /></span>
+          <div><h2>Contact details</h2><p>The public Instagram profile is fixed; this email is displayed as the other contact channel.</p></div>
+        </div>
+        {loadError && <div className="admin-alert admin-alert-error" role="alert">{loadError} <button className="admin-inline-button" onClick={loadSettings} type="button">Retry</button></div>}
+        <p><a className="admin-record-link" href="https://www.instagram.com/_workzennn_/" rel="noreferrer" target="_blank">https://www.instagram.com/_workzennn_/</a></p>
+        <label>Business email<input autoComplete="email" name="business_email" onChange={updateField} placeholder="hello@yourbrand.com" type="email" value={form.business_email} /></label>
+        {errorMessage && <p aria-live="polite" className="admin-alert admin-alert-error" role="alert">{errorMessage}</p>}
+        {status && <p aria-live="polite" className="admin-alert admin-alert-success" role="status">{status}</p>}
+        <button className="button button-red admin-save-button" disabled={saving} type="submit">{saving ? "Saving..." : "Save social settings"}</button>
+      </form>
+    </>
+  );
+}
 
+function AdminDashboard() {
+  const [section, setSection] = useState("overview");
+  const [errorMessage, setErrorMessage] = useState("");
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  async function handleLogout() {
+    setLoggingOut(true);
     const { error } = await supabase.auth.signOut();
     if (error) {
       setErrorMessage(error.message || "Could not sign out. Please try again.");
+      setLoggingOut(false);
       return;
     }
-
     window.location.replace("/admin/login");
   }
 
@@ -277,53 +667,22 @@ function AdminDashboard() {
     <main className="admin-dashboard-page">
       <header className="admin-topbar">
         <a aria-label="WORKZENN website" className="brand-mark" href="/">WORKZENN<span>.</span></a>
-        <div>
-          <span className="admin-account-label">Admin dashboard</span>
-          <button className="admin-logout" onClick={handleLogout} type="button">Log out <span aria-hidden="true">↗</span></button>
-        </div>
+        <div><span className="admin-account-label">{ADMIN_EMAIL}</span><button className="admin-logout" disabled={loggingOut} onClick={handleLogout} type="button">{loggingOut ? "Logging out..." : "Log out"} <span aria-hidden="true">↗</span></button></div>
       </header>
-      <section className="admin-dashboard-content">
-        <a className="admin-back-link" href="/">← View website</a>
-        <div className="admin-dashboard-heading">
-          <p className="eyebrow"><span className="status-dot" /> Site configuration</p>
-          <h1>Social media settings</h1>
-          <p>Update your public contact and social links. Changes are used throughout the website.</p>
-        </div>
-        <form className="admin-settings-card" onSubmit={handleSave}>
-          <div className="admin-settings-title">
-            <span className="admin-settings-icon"><InstagramIcon /></span>
-            <div><h2>Social & contact details</h2><p>Only authorized admins can change these values.</p></div>
-          </div>
-          {loadError && (
-            <div className="admin-alert admin-alert-error" role="alert">
-              {loadError} <button className="admin-inline-button" onClick={loadSettings} type="button">Retry</button>
-            </div>
-          )}
-          <label>
-            Instagram username
-            <input autoComplete="off" name="instagram_username" onChange={updateField} placeholder="_workzennn_" value={form.instagram_username} />
-            <span className="admin-field-hint">Enter without the @ symbol.</span>
-          </label>
-          <label>
-            Instagram profile URL
-            <input autoComplete="url" name="instagram_url" onChange={updateField} placeholder="https://www.instagram.com/_workzennn_/" type="url" value={form.instagram_url} />
-          </label>
-          <label>
-            WhatsApp number
-            <input autoComplete="tel" inputMode="tel" name="whatsapp_number" onChange={updateField} placeholder="Country code + number, e.g. 919876543210" value={form.whatsapp_number} />
-            <span className="admin-field-hint">Include your country code; spaces and punctuation are removed when saved.</span>
-          </label>
-          <label>
-            Business email
-            <input autoComplete="email" name="business_email" onChange={updateField} placeholder="hello@yourbrand.com" type="email" value={form.business_email} />
-          </label>
+      <div className="admin-workspace">
+        <nav aria-label="Admin dashboard" className="admin-sidebar">
+          {sections.map(([id, title]) => (
+            <button aria-current={section === id ? "page" : undefined} className={section === id ? "is-active" : ""} key={id} onClick={() => { setSection(id); setErrorMessage(""); }} type="button">{title}</button>
+          ))}
+          <a className="admin-back-link" href="/">← View website</a>
+        </nav>
+        <section className="admin-dashboard-content">
           {errorMessage && <p aria-live="polite" className="admin-alert admin-alert-error" role="alert">{errorMessage}</p>}
-          {status && <p aria-live="polite" className="admin-alert admin-alert-success" role="status">{status}</p>}
-          <button className="button button-red admin-save-button" disabled={saving} type="submit">
-            {saving ? "Saving..." : "Save social settings"}
-          </button>
-        </form>
-      </section>
+          {section === "overview" ? <DashboardOverview onNavigate={setSection} /> : null}
+          {section === "social" ? <SocialSettingsManager /> : null}
+          {managerConfig[section] ? <AdminManager key={section} section={section} /> : null}
+        </section>
+      </div>
     </main>
   );
 }
@@ -337,7 +696,6 @@ export function AdminRoute() {
       window.location.replace("/admin/login");
       return undefined;
     }
-
     let active = true;
     let checkId = 0;
     let handlingUnauthorized = false;
@@ -348,14 +706,8 @@ export function AdminRoute() {
         window.location.replace("/admin/login?redirect=%2Fadmin");
         return;
       }
-
       setAccess("checking");
-      const { data, error } = await supabase
-        .from("admin_users")
-        .select("user_id")
-        .eq("user_id", session.user.id)
-        .maybeSingle();
-
+      const { data, error } = await supabase.rpc("is_workzenn_admin");
       if (!active || currentCheck !== checkId) return;
       if (error) {
         setErrorMessage(error.message || "Could not verify admin access.");
@@ -380,7 +732,6 @@ export function AdminRoute() {
       }
       verifySession(data.session);
     });
-
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === "SIGNED_OUT" && !handlingUnauthorized) {
         window.location.replace("/admin/login");
@@ -388,7 +739,6 @@ export function AdminRoute() {
         verifySession(session);
       }
     });
-
     return () => {
       active = false;
       subscription.unsubscribe();
@@ -401,9 +751,7 @@ export function AdminRoute() {
       <main className="admin-auth-page">
         <section className="admin-auth-card">
           <a aria-label="WORKZENN home" className="brand-mark" href="/">WORKZENN<span>.</span></a>
-          <div className="admin-alert admin-alert-error" role="alert">
-            Admin access could not be verified: {errorMessage}
-          </div>
+          <div className="admin-alert admin-alert-error" role="alert">Admin access could not be verified: {errorMessage}</div>
           <a className="button button-outline" href="/admin/login">Return to admin sign in</a>
         </section>
       </main>
