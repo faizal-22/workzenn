@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSocialSettings } from "./contexts/SocialSettingsContext.jsx";
 import { supabase } from "./lib/supabase.js";
 
@@ -79,23 +79,100 @@ const projects = [
 
 const packages = [
   {
-    name: "The essentials",
-    detail: "For a focused start",
-    price: "From $1,200",
-    items: ["One clear project scope", "A dedicated creative partner", "2–3 week delivery"],
+    name: "Photo Editing",
+    detail: "Clear, upfront pricing",
+    price: "₹99",
+    items: [],
   },
   {
-    name: "The full picture",
-    detail: "For a brand ready to grow",
-    price: "From $3,500",
-    featured: true,
-    items: ["Strategy through launch", "Brand and digital design", "Ongoing growth support"],
+    name: "Background Removal",
+    detail: "Clear, upfront pricing",
+    price: "₹49",
+    items: [],
   },
   {
-    name: "Ongoing studio",
-    detail: "For the work that keeps moving",
-    price: "Custom retainer",
-    items: ["Flexible monthly support", "Priority project planning", "A team in your corner"],
+    name: "Photo Manipulation",
+    detail: "Clear, upfront pricing",
+    price: "₹199",
+    items: [],
+  },
+  {
+    name: "Instagram Poster",
+    detail: "Clear, upfront pricing",
+    price: "₹149",
+    items: [],
+  },
+  {
+    name: "Logo Design",
+    detail: "Clear, upfront pricing",
+    price: "₹299",
+    items: [],
+  },
+  {
+    name: "Premium Logo",
+    detail: "Clear, upfront pricing",
+    price: "₹599",
+    items: [],
+  },
+  {
+    name: "Thumbnail Design",
+    detail: "Clear, upfront pricing",
+    price: "₹99",
+    items: [],
+  },
+  {
+    name: "Reel Editing",
+    detail: "Clear, upfront pricing",
+    price: "₹199",
+    items: [],
+  },
+  {
+    name: "Basic Video Editing",
+    detail: "Clear, upfront pricing",
+    price: "₹299",
+    items: [],
+  },
+  {
+    name: "Content Creation",
+    detail: "Clear, upfront pricing",
+    price: "₹199",
+    items: [],
+  },
+  {
+    name: "Social Media Post",
+    detail: "Clear, upfront pricing",
+    price: "₹149",
+    items: [],
+  },
+  {
+    name: "Landing Page",
+    detail: "Clear, upfront pricing",
+    price: "₹1,499",
+    items: [],
+  },
+  {
+    name: "Basic Website",
+    detail: "Clear, upfront pricing",
+    price: "₹2,999",
+    items: [],
+  },
+  {
+    name: "Professional Website",
+    detail: "Clear, upfront pricing",
+    price: "₹5,999",
+    items: [],
+  },
+  {
+    name: "Basic Android App",
+    detail: "Final price depends on project requirements",
+    price: "Starting at ₹4,999",
+    items: [],
+  },
+  {
+    name: "Custom Project",
+    detail: "Scope-based custom quotation",
+    price: "Custom quotation",
+    items: [],
   },
 ];
 
@@ -209,6 +286,9 @@ function App() {
   const [formSubmitted, setFormSubmitted] = useState(false);
   const [formSubmitting, setFormSubmitting] = useState(false);
   const [formMessage, setFormMessage] = useState("");
+  const [selectedEnquiryService, setSelectedEnquiryService] = useState("");
+  const [customBudgetSelected, setCustomBudgetSelected] = useState(false);
+  const submissionKey = useRef(crypto.randomUUID());
 
   useEffect(() => {
     if (!supabase) return;
@@ -217,7 +297,7 @@ function App() {
       const [portfolioResult, servicesResult, pricingResult] = await Promise.all([
         supabase.from("portfolio_samples").select("id,name,type,category,description,asset_url,asset_type").eq("published", true).order("sort_order", { ascending: true }),
         supabase.from("services").select("id,title,description,tags").eq("published", true).order("sort_order", { ascending: true }),
-        supabase.from("pricing_plans").select("id,name,detail,price,items,featured").eq("published", true).order("sort_order", { ascending: true }),
+        supabase.from("pricing_plans").select("*").eq("published", true).order("sort_order", { ascending: true }),
       ]);
       if (!active) return;
       if (portfolioResult.error) console.error("Could not load published portfolio:", portfolioResult.error);
@@ -232,7 +312,10 @@ function App() {
       if (servicesResult.error) console.error("Could not load published services:", servicesResult.error);
       else if (servicesResult.data.length) setVisibleServices(servicesResult.data);
       if (pricingResult.error) console.error("Could not load published pricing:", pricingResult.error);
-      else if (pricingResult.data.length) setVisiblePackages(pricingResult.data);
+      else {
+        const currentPricing = pricingResult.data.filter((plan) => Boolean(plan.pricing_key));
+        if (currentPricing.length) setVisiblePackages(currentPricing);
+      }
     }
     loadPublishedContent();
     return () => { active = false; };
@@ -253,8 +336,20 @@ function App() {
       business: String(formData.get("business") || "").trim(),
       service: String(formData.get("service")),
       budget: String(formData.get("budget")),
+      customBudget: String(formData.get("custom_budget") || "").trim(),
       description: String(formData.get("description")).trim(),
+      instagram_username: String(formData.get("instagram_username") || "").trim().replace(/^@+/, ""),
+      reference_image_url: String(formData.get("reference_image_url") || "").trim(),
     };
+    if (request.budget === "Custom Budget") {
+      const customBudgetAmount = request.customBudget.replace(/,/g, "");
+      if (!/^[0-9]+$/.test(customBudgetAmount)) {
+        setFormSubmitted(true);
+        setFormMessage("Enter a valid custom budget in rupees.");
+        return;
+      }
+      request.budget = `Custom Budget: ₹${customBudgetAmount}`;
+    }
 
     window.open(INSTAGRAM_PROFILE_URL, "_blank", "noopener,noreferrer");
     setFormSubmitted(false);
@@ -269,6 +364,7 @@ function App() {
     }
 
     let enquiryId;
+    let notificationToken;
     try {
       const { data, error: saveError } = await supabase.rpc("submit_customer_enquiry", {
         p_request_type: request.request_type,
@@ -278,9 +374,16 @@ function App() {
         p_service: request.service,
         p_budget: request.budget,
         p_description: request.description,
+        p_instagram_username: request.instagram_username,
+        p_reference_image_url: request.reference_image_url,
+        p_submission_key: submissionKey.current,
       });
       if (saveError) throw saveError;
-      enquiryId = data;
+      enquiryId = data?.enquiryId;
+      notificationToken = data?.notificationToken;
+      if (typeof enquiryId !== "string" || typeof notificationToken !== "string") {
+        throw new Error("The enquiry could not be confirmed by the database.");
+      }
     } catch (error) {
       console.error("Could not save customer enquiry:", error);
       setFormSubmitted(true);
@@ -290,21 +393,32 @@ function App() {
     }
 
     formElement.reset();
+    setSelectedEnquiryService("");
+    setCustomBudgetSelected(false);
+    submissionKey.current = crypto.randomUUID();
     setFormSubmitted(true);
     try {
       const { data: notification, error: notificationError } = await supabase.functions.invoke(
-        "send-enquiry-notification",
-        { body: { enquiryId } },
+        "send-enquiry-email",
+        { body: { enquiryId, notificationToken } },
       );
-      if (notificationError || notification?.status !== "sent") {
+      let failedStatus = notification?.status;
+      if (notificationError?.context && typeof notificationError.context.clone === "function") {
+        try {
+          failedStatus = (await notificationError.context.clone().json()).status || failedStatus;
+        } catch {
+          // Keep the response status when the function returned a non-JSON error.
+        }
+      }
+      if (notificationError || !["sent", "already_sent"].includes(notification?.status)) {
         console.error("Enquiry saved, but email notification was not delivered:", notificationError || notification);
-        setFormMessage("Your enquiry was saved and WORKZENN will follow up. Email notification is pending; you can also message us on Instagram.");
+        setFormMessage(`Enquiry #${enquiryId} is saved. Email notification ${failedStatus === "failed" ? "failed and can be retried by an admin" : "could not be confirmed"}; WORKZENN can retry it from the admin dashboard.`);
       } else {
-        setFormMessage("Your enquiry was saved and sent to WORKZENN. Instagram opened in a new tab if you'd also like to say hello.");
+        setFormMessage(`Enquiry #${enquiryId} is saved and its email notification was sent to WORKZENN.`);
       }
     } catch (error) {
       console.error("Enquiry saved, but email notification request failed:", error);
-      setFormMessage("Your enquiry was saved and WORKZENN will follow up. Email notification is pending; you can also message us on Instagram.");
+      setFormMessage(`Enquiry #${enquiryId} is saved. Email notification could not be confirmed; WORKZENN can retry it from the admin dashboard.`);
     } finally {
       setFormSubmitting(false);
     }
@@ -480,25 +594,23 @@ function App() {
           />
           <div className="pricing-grid">
             {visiblePackages.map((plan) => (
-              <article className={`price-card${plan.featured ? " price-featured" : ""}`} key={plan.name}>
-                {plan.featured && <span className="popular-label">A good place to start</span>}
+              <article className="price-card" key={plan.id || plan.name}>
                 <p className="eyebrow">{plan.detail}</p>
                 <h3>{plan.name}</h3>
                 <p className="price">{plan.price}</p>
-                <ul>
-                  {plan.items.map((item) => <li key={item}><span aria-hidden="true">+</span>{item}</li>)}
-                </ul>
                 <a
-                  className={`button${plan.featured ? " button-red" : " button-outline"}`}
-                  href={INSTAGRAM_PROFILE_URL}
-                  rel="noreferrer"
-                  target="_blank"
+                  className="button button-outline"
+                  href="#contact"
+                  onClick={() => setSelectedEnquiryService(plan.name)}
                 >
-                  Enquire about this <ArrowIcon diagonal />
+                  Request a quote <ArrowIcon />
                 </a>
               </article>
             ))}
           </div>
+          <p className="pricing-disclaimer">
+            All prices are in INR. Listed prices cover the stated service scope; final costs may vary with project complexity or add-ons. We confirm custom quotations with you before work begins.
+          </p>
         </section>
 
         <section className="trial-section content-section" id="contact">
@@ -540,29 +652,73 @@ function App() {
                 <input autoComplete="organization" name="business" placeholder="Your brand or URL (optional)" />
               </label>
               <label>
+                Instagram username
+                <input
+                  autoComplete="off"
+                  maxLength={31}
+                  name="instagram_username"
+                  pattern="@?[A-Za-z0-9._]{1,30}"
+                  placeholder="@yourusername (optional)"
+                  title="Use 1–30 letters, numbers, dots, or underscores."
+                />
+              </label>
+              <label>
                 What are you looking for? <span>*</span>
-                <select defaultValue="" name="service" required>
+                <select name="service" onChange={(event) => setSelectedEnquiryService(event.target.value)} required value={selectedEnquiryService}>
                   <option disabled value="">Choose an area</option>
-                  <option>Brand and identity</option>
-                  <option>Website and digital</option>
-                  <option>Growth and content</option>
-                  <option>Not sure yet</option>
+                  {visiblePackages.map((plan) => <option key={plan.id || plan.name} value={plan.name}>{plan.name}</option>)}
+                  <option value="Other / not sure yet">Other / not sure yet</option>
                 </select>
               </label>
               <label>
                 Project budget <span>*</span>
-                <select defaultValue="" name="budget" required>
+                <select
+                  defaultValue=""
+                  name="budget"
+                  onChange={(event) => setCustomBudgetSelected(event.target.value === "Custom Budget")}
+                  required
+                >
                   <option disabled value="">Choose a budget range</option>
-                  <option>Under $1,200</option>
-                  <option>$1,200–$3,500</option>
-                  <option>$3,500–$7,500</option>
-                  <option>$7,500+</option>
-                  <option>Not sure yet</option>
+                  <option>₹100 – ₹300</option>
+                  <option>₹300 – ₹500</option>
+                  <option>₹500 – ₹1,000</option>
+                  <option>₹1,000 – ₹2,500</option>
+                  <option>₹2,500 – ₹5,000</option>
+                  <option>₹5,000 – ₹10,000</option>
+                  <option>₹10,000+</option>
+                  <option>Custom Budget</option>
                 </select>
               </label>
+              {customBudgetSelected && (
+                <label>
+                  Your custom budget (INR) <span>*</span>
+                  <input
+                    inputMode="numeric"
+                    min="1"
+                    name="custom_budget"
+                    maxLength={18}
+                    pattern="[0-9,]+"
+                    placeholder="Enter an amount in rupees"
+                    required
+                    type="text"
+                  />
+                </label>
+              )}
               <label>
                 Project description <span>*</span>
                 <textarea autoComplete="off" maxLength={5000} minLength={10} name="description" placeholder="Tell us what you are looking to create or improve..." required rows="4" />
+              </label>
+              <label>
+                Reference image URL
+                <input
+                  autoComplete="url"
+                  maxLength={2048}
+                  name="reference_image_url"
+                  pattern="https://.*"
+                  placeholder="https://... (optional)"
+                  type="url"
+                />
+                <span className="admin-field-hint">Share a secure image link if you have a visual reference.</span>
               </label>
               <button className="button button-red form-submit" disabled={formSubmitting} type="submit">
                 {formSubmitting ? "Saving enquiry..." : "Send enquiry & open Instagram"} <ArrowIcon diagonal />
@@ -570,7 +726,7 @@ function App() {
               <p aria-live="polite" className={`form-feedback${formSubmitted && formMessage.includes("could not") ? " form-feedback-error" : ""}`}>
                 {formSubmitted
                   ? formMessage
-                  : "Your enquiry is saved securely. Instagram opens in a new tab when you submit."}
+                  : "Submitting saves your enquiry first, then sends an email notification."}
               </p>
             </form>
           </div>

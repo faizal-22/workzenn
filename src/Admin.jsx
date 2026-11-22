@@ -252,19 +252,19 @@ const managerConfig = {
   },
   pricing: {
     table: "pricing_plans",
-    title: "Pricing plans",
-    description: "Manage the pricing packages displayed on the public website.",
+    title: "Service pricing",
+    description: "Manage INR prices for the services displayed on the public website.",
     fields: ["name", "detail", "price", "items", "featured", "published"],
   },
   enquiries: {
-    table: "customer_enquiries",
+    table: "enquiries",
     title: "Customer enquiries",
     description: "Review messages submitted through the public website.",
     requestType: "enquiry",
     readOnly: true,
   },
   trials: {
-    table: "customer_enquiries",
+    table: "enquiries",
     title: "Free trial requests",
     description: "Review requests for a complimentary consultation.",
     requestType: "trial",
@@ -286,10 +286,18 @@ function initialValues(section) {
     tags: "",
     detail: "",
     price: "",
+    pricing_key: "",
     items: "",
     featured: false,
   };
   return defaults;
+}
+
+function canRetryEmail(row) {
+  if (["pending", "failed"].includes(row.notification_status)) return true;
+  return row.notification_status === "sending"
+    && row.notification_attempted_at
+    && Date.parse(row.notification_attempted_at) < Date.now() - 10 * 60 * 1000;
 }
 
 function AdminManager({ section }) {
@@ -300,16 +308,19 @@ function AdminManager({ section }) {
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [retryingId, setRetryingId] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [status, setStatus] = useState("");
 
   const loadRows = useCallback(async () => {
     setLoading(true);
     setErrorMessage("");
-    let query = supabase.from(config.table).select("*");
+    const enquiryColumns = "id,request_type,name,email,business,service,budget,description,instagram_username,reference_image_url,status,notification_status,notification_error,notification_attempted_at,created_at";
+    let query = supabase.from(config.table).select(config.table === "enquiries" ? enquiryColumns : "*");
     if (config.requestType) query = query.eq("request_type", config.requestType);
     if (config.assetType) query = query.eq("asset_type", config.assetType);
-    if (config.table === "customer_enquiries") query = query.order("created_at", { ascending: false });
+    if (section === "pricing") query = query.not("pricing_key", "is", null);
+    if (config.table === "enquiries") query = query.order("created_at", { ascending: false });
     else query = query.order("sort_order", { ascending: true }).order("created_at", { ascending: false });
 
     const { data, error } = await query;
@@ -344,10 +355,20 @@ function AdminManager({ section }) {
 
   async function handleSave(event) {
     event.preventDefault();
-    setBusy(true);
     setErrorMessage("");
     setStatus("");
+    let normalizedPrice = "";
+    if (config.table === "pricing_plans") {
+      normalizedPrice = String(values.price).trim();
+      if (!/^(?:₹(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)|Starting at ₹(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)|Custom quotation)$/.test(normalizedPrice)) {
+        setErrorMessage("Enter an INR price (for example ₹299 or Starting at ₹4,999) or use Custom quotation.");
+        return;
+      }
+    }
+
+    setBusy(true);
     let nextValues = { ...values };
+    if (config.table === "pricing_plans") nextValues.price = normalizedPrice;
     let uploadedPath = "";
     let cleanupWarning = "";
 
@@ -381,7 +402,12 @@ function AdminManager({ section }) {
         editable.storage_path = nextValues.storage_path || "";
       }
       if (config.table === "services") editable.tags = nextValues.tags;
-      if (config.table === "pricing_plans") editable.items = nextValues.items;
+      if (config.table === "pricing_plans") {
+        editable.items = nextValues.items;
+        editable.pricing_key = editingId
+          ? values.pricing_key
+          : String(values.name).toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      }
 
       const request = editingId
         ? supabase.from(config.table).update(editable).eq("id", editingId)
@@ -434,26 +460,36 @@ function AdminManager({ section }) {
 
   async function handleStatusChange(row, statusValue) {
     setErrorMessage("");
-    const { error } = await supabase.from("customer_enquiries").update({ status: statusValue }).eq("id", row.id);
+    const { error } = await supabase.from("enquiries").update({ status: statusValue }).eq("id", row.id);
     if (error) setErrorMessage(error.message || "Could not update the enquiry status.");
     else await loadRows();
   }
 
   async function handleNotificationRetry(row) {
     setErrorMessage("");
-    const { data, error } = await supabase.functions.invoke("send-enquiry-notification", {
-      body: { enquiryId: row.id },
-    });
-    if (error) {
-      setErrorMessage(`Enquiry is still saved, but email retry failed: ${error.message}`);
-      return;
+    setRetryingId(row.id);
+    try {
+      const { data, error } = await supabase.functions.invoke("send-enquiry-email", {
+        body: { enquiryId: row.id },
+      });
+      if (error) {
+        await loadRows();
+        setErrorMessage(`Enquiry is still saved, but email retry failed: ${error.message}`);
+        return;
+      }
+      if (data?.status !== "sent" && data?.status !== "already_sent") {
+        await loadRows();
+        setErrorMessage(`Enquiry is still saved, but email notification was not delivered: ${data?.message || "Unknown error."}`);
+        return;
+      }
+      await loadRows();
+      setStatus("Email notification delivered.");
+    } catch (error) {
+      await loadRows();
+      setErrorMessage(`Enquiry is still saved, but email retry failed: ${error.message || "Unknown error."}`);
+    } finally {
+      setRetryingId("");
     }
-    if (data?.status !== "sent" && data?.status !== "already_sent") {
-      setErrorMessage(`Enquiry is still saved, but email notification was not delivered: ${data?.message || "Unknown error."}`);
-      return;
-    }
-    setStatus("Email notification delivered.");
-    await loadRows();
   }
 
   function updateField(event) {
@@ -485,7 +521,7 @@ function AdminManager({ section }) {
 
           {(config.table === "portfolio_samples" || config.table === "pricing_plans") && (
             <label>
-              {config.table === "pricing_plans" ? "Plan name" : "Project name"}
+              {config.table === "pricing_plans" ? "Service name" : "Project name"}
               <input name="name" onChange={updateField} required value={values.name} />
             </label>
           )}
@@ -518,7 +554,11 @@ function AdminManager({ section }) {
           {config.table === "pricing_plans" && (
             <>
               <label>Plan detail<input name="detail" onChange={updateField} value={values.detail} /></label>
-              <label>Price<input name="price" onChange={updateField} value={values.price} /></label>
+              <label>
+                Price (INR)
+                <input name="price" onChange={updateField} placeholder="₹299, Starting at ₹4,999, or Custom quotation" value={values.price} />
+                <span className="admin-field-hint">Use INR only. You can set fixed prices, starting prices, or custom quotations.</span>
+              </label>
               <label>What's included (one per line)<textarea name="items" onChange={updateField} rows="4" value={values.items} /></label>
               <label className="admin-checkbox-label"><input checked={values.featured} name="featured" onChange={updateField} type="checkbox" /> Highlight as featured</label>
             </>
@@ -542,14 +582,26 @@ function AdminManager({ section }) {
             <div>
               <h2>{row.name || row.title || row.email}</h2>
               <p>{row.description || row.service || row.detail || row.email || row.request_type}</p>
+              {section === "pricing" && row.price && <p>Price: {row.price}</p>}
               {row.created_at && <time dateTime={row.created_at}>{new Date(row.created_at).toLocaleString()}</time>}
+              {row.request_type && <p>Enquiry ID: {row.id}</p>}
               {row.request_type && <p>Request type: {row.request_type === "trial" ? "Free trial" : "Enquiry"}</p>}
               {row.email && <a className="admin-record-link" href={`mailto:${row.email}`}>{row.email}</a>}
               {row.service && <p>Selected service: {row.service}</p>}
-              {row.budget && <p>Budget: {row.budget}</p>}
+              {row.budget && <p>Customer budget: {row.budget}</p>}
+              {row.instagram_username && <p>Instagram: @{row.instagram_username.replace(/^@+/, "")}</p>}
               {row.business && <p>Business: {row.business}</p>}
               {row.request_type && row.description && <p>Project description: {row.description}</p>}
-              {row.notification_status && <p>Email notification: {row.notification_status}</p>}
+              {row.reference_image_url && <a className="admin-record-link" href={row.reference_image_url} rel="noreferrer" target="_blank">View reference image</a>}
+              {row.notification_status && (
+                <p>Email notification: {{
+                  sent: "Sent",
+                  failed: "Failed",
+                  pending: "Pending",
+                  sending: "Pending",
+                  not_applicable: "Not sent",
+                }[row.notification_status] || "Pending"}</p>
+              )}
               {row.notification_error && <p className="admin-notification-error">Notification error: {row.notification_error}</p>}
               {"published" in row && <span className={`admin-record-status${row.published ? " is-published" : ""}`}>{row.published ? "Published" : "Draft"}</span>}
               {row.asset_url && <a className="admin-record-link" href={row.asset_url} rel="noreferrer" target="_blank">View media</a>}
@@ -563,7 +615,11 @@ function AdminManager({ section }) {
             </div>
             <div className="admin-record-actions">
               {config.table === "portfolio_samples" && <button className="admin-text-button" onClick={() => handleToggle(row)} type="button">{row.published ? "Unpublish" : "Publish"}</button>}
-              {row.request_type && ["pending", "failed"].includes(row.notification_status) && <button className="admin-text-button" onClick={() => handleNotificationRetry(row)} type="button">Retry email</button>}
+              {row.request_type && canRetryEmail(row) && (
+                <button className="admin-text-button" disabled={retryingId === row.id} onClick={() => handleNotificationRetry(row)} type="button">
+                  {retryingId === row.id ? "Retrying..." : "Retry email"}
+                </button>
+              )}
               {!config.readOnly && <button className="admin-text-button" onClick={() => startEdit(row)} type="button">Edit</button>}
               <button className="admin-text-button" onClick={() => handleDelete(row)} type="button">Delete</button>
             </div>

@@ -81,10 +81,7 @@ $$;
 revoke all on function public.submit_customer_enquiry(text, text, text, text, text, text, text) from public;
 grant execute on function public.submit_customer_enquiry(text, text, text, text, text, text, text) to anon, authenticated;
 
-alter table public.social_media_settings
-  drop column if exists whatsapp_number,
-  drop column if exists instagram_username,
-  drop column if exists instagram_url;
+
 
 update public.social_media_settings
 set business_email = 'workzenn7@gmail.com'
